@@ -6,6 +6,7 @@ package core
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 )
 
@@ -140,6 +141,19 @@ func (p *Process) ReadCString(a Address) string {
 			b := make([]byte, n)
 			p.ReadAt(b, a)
 			return string(b)
+		}
+	}
+}
+
+var overflow = errors.New("binary: varint overflows a 64-bit integer")
+
+func (p *Process) ReadUvarint(a Address) (uint64, int) {
+	v := uint64(0)
+	for i := 0; ; i++ {
+		b := p.ReadUint8(a.Add(int64(i)))
+		v += uint64(b&0x7f) << (7 * i)
+		if b&0x80 == 0 {
+			return v, i + 1
 		}
 	}
 }

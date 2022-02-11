@@ -117,6 +117,10 @@ func (p *Process) runtimeType2Type(a core.Address) *Type {
 		return t
 	}
 
+	if a == 26996960 {
+		fmt.Printf("should be zap something\n")
+	}
+
 	// Read runtime._type.size
 	r := region{p: p, a: a, typ: p.findType("runtime._type")}
 	size := int64(r.Field("size").Uintptr())
@@ -134,11 +138,22 @@ func (p *Process) runtimeType2Type(a core.Address) *Type {
 	var name string
 	if m != nil {
 		x := m.types.Add(int64(r.Field("str").Int32()))
-		n := uint16(p.proc.ReadUint8(x.Add(1)))<<8 + uint16(p.proc.ReadUint8(x.Add(2)))
-		b := make([]byte, n)
-		p.proc.ReadAt(b, x.Add(3))
-		name = string(b)
-		if r.Field("tflag").Uint8()&uint8(p.rtConstants["tflagExtraStar"]) != 0 {
+		oldFormat := false // 287025925f66f90ad9b30aea2e533928026a8376
+		if oldFormat {
+			n := uint16(p.proc.ReadUint8(x.Add(1)))<<8 + uint16(p.proc.ReadUint8(x.Add(2)))
+			b := make([]byte, n)
+			p.proc.ReadAt(b, x.Add(3))
+			name = string(b)
+		} else {
+			n, encodedLength := p.proc.ReadUvarint(x.Add(1))
+
+			b := make([]byte, n)
+			p.proc.ReadAt(b, x.Add(int64(1+encodedLength)))
+			name = string(b)
+		}
+		tflag := r.Field("tflag").Uint8()
+		tflagExtraStar := uint8(p.rtConstants["tflagExtraStar"])
+		if tflag&tflagExtraStar != 0 {
 			name = name[1:]
 		}
 	} else {
@@ -172,6 +187,31 @@ func (p *Process) runtimeType2Type(a core.Address) *Type {
 			candidates = append(candidates, t)
 		}
 	}
+	if len(candidates) == 0 && strings.HasPrefix(name, "*") {
+		for _, t := range p.runtimeNameMap[strings.TrimPrefix(name, "*")] {
+			if size == t.Size && equal(ptrs, t.ptrs()) {
+				candidates = append(candidates, t)
+			}
+		}
+	}
+	if len(candidates) == 0 {
+		munged := strings.Replace(name, "*", "*go-", 1)
+		for _, t := range p.runtimeNameMap[munged] {
+			if size == t.Size && equal(ptrs, t.ptrs()) {
+				fmt.Printf("found candidate with go- hack %q => %q: %v\n", name, munged, t)
+				candidates = append(candidates, t)
+			}
+		}
+	}
+	if len(candidates) == 0 {
+		munged := strings.Replace(name, "*", "*controller-", 1)
+		for _, t := range p.runtimeNameMap[munged] {
+			if size == t.Size && equal(ptrs, t.ptrs()) {
+				fmt.Printf("found candidate with controller- hack %q => %q: %v\n", name, munged, t)
+				candidates = append(candidates, t)
+			}
+		}
+	}
 	var t *Type
 	if len(candidates) > 0 {
 		// If a runtime type matches more than one DWARF type,
@@ -181,6 +221,14 @@ func (p *Process) runtimeType2Type(a core.Address) *Type {
 		// TODO: investigate the reason for this duplication.
 		t = candidates[0]
 	} else {
+		if strings.Contains(name, "KubeAwareEncoder") {
+			fmt.Printf("wot\n")
+			for k := range p.runtimeNameMap {
+				if strings.Contains(k, "KubeAwareEncoder") {
+					fmt.Printf("found candidate %s\n", k)
+				}
+			}
+		}
 		// There's no corresponding DWARF type.  Make our own.
 		t = &Type{Name: name, Size: size, Kind: KindStruct}
 		n := t.Size / ptrSize
@@ -535,6 +583,9 @@ func (p *Process) typeObject(a core.Address, t *Type, r reader, add func(core.Ad
 	case KindBool, KindInt, KindUint, KindFloat, KindComplex:
 		// Nothing to do
 	case KindEface, KindIface:
+		if a == 0xc0003a6180+24 {
+			fmt.Printf("hello\n")
+		}
 		// interface. Use the type word to determine the type
 		// of the pointed-to object.
 		typPtr := r.ReadPtr(a)

@@ -14,7 +14,9 @@ import (
 	"html"
 	"math"
 	"net/http"
+	"sort"
 	"strconv"
+	"strings"
 
 	"golang.org/x/debug/internal/core"
 	"golang.org/x/debug/internal/gocore"
@@ -48,6 +50,10 @@ func serveHTML(c *gocore.Process, port int, async bool) {
 		fmt.Fprintf(w, "<h1>object %x</h1>\n", a)
 		fmt.Fprintf(w, "<h3>%s</h3>\n", html.EscapeString(typeName(c, x)))
 		fmt.Fprintf(w, "<h3>%d bytes</h3>\n", size)
+
+		reachability := c.Reachability()
+		total := reachability.ReachableFrom[addr]
+		fmt.Fprintf(w, "<h3>total: %d bytes</h3>\n", total)
 
 		if typ != nil && repeat == 1 && typ.String() == "runtime.g" {
 			found := false
@@ -184,6 +190,75 @@ func serveHTML(c *gocore.Process, port int, async bool) {
 		for _, r := range c.Globals() {
 			htmlObject(w, c, r.Name, r.Addr, r.Type, nil)
 		}
+		fmt.Fprintf(w, "</table>\n")
+	})
+	http.HandleFunc("/top", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "<h1>globals</h1>\n")
+		tableStyle(w)
+		fmt.Fprintf(w, "<table>\n")
+		fmt.Fprintf(w, "<tr><th align=left>type</th><th align=left>size</th><th align=left>link</th><th>refs</th></tr>\n")
+
+		reachability := c.Reachability()
+
+		type Reachable struct {
+			Addr  core.Address
+			Total int64
+		}
+
+		var reachables []Reachable
+		for addr, total := range reachability.ReachableFrom {
+			reachables = append(reachables, Reachable{Addr: addr, Total: total})
+		}
+		sort.Slice(reachables, func(i, j int) bool { return reachables[i].Total < reachables[j].Total })
+
+		top := 0
+		for i := len(reachables) - 1; i >= 0; i-- {
+			r := reachables[i]
+			if !reachability.Roots[r.Addr] {
+				continue
+			}
+			t, _ := c.Type(gocore.Object(r.Addr))
+			if t != nil {
+				top++
+				if top > 50 {
+					break
+				}
+				fmt.Fprintf(w, "<tr><td>%s</td><td>%v</td><td>%s</td>", t, r.Total, htmlPointer(c, r.Addr))
+
+				fmt.Fprintf(w, "<td>")
+				nrev := 0
+				c.ForEachReversePtr(gocore.Object(r.Addr), func(z gocore.Object, r *gocore.Root, i, j int64) bool {
+					if nrev == 10 {
+						fmt.Fprintf(w, "...additional references elided...<br/>\n")
+						return false
+					}
+					if r != nil {
+						fmt.Fprintf(w, "%s%s", r.Name, typeFieldName(r.Type, i))
+					} else {
+						t, r := c.Type(z)
+						if t == nil {
+							fmt.Fprintf(w, "%s", htmlPointer(c, c.Addr(z).Add(i)))
+						} else {
+							idx := ""
+							if r > 1 {
+								idx = fmt.Sprintf("[%d]", i/t.Size)
+								i %= t.Size
+							}
+							fmt.Fprintf(w, "%s%s%s", htmlPointer(c, c.Addr(z)), idx, typeFieldName(t, i))
+						}
+					}
+					// fmt.Fprintf(w, " → %s<br/>\n", htmlPointer(c, r.Addr.Add(j)))
+					fmt.Fprintf(w, "<br/>\n")
+					nrev++
+					return true
+				})
+
+				fmt.Fprintf(w, "</td></tr>")
+			}
+		}
+
+	
+
 		fmt.Fprintf(w, "</table>\n")
 	})
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -334,6 +409,9 @@ func htmlObject(w http.ResponseWriter, c *gocore.Process, name string, a core.Ad
 		n := t.Count
 		if n*s > 16384 {
 			n = (16384 + s - 1) / s
+		}
+		if n > 1 {
+			n = 1
 		}
 		for i := int64(0); i < n; i++ {
 			htmlObject(w, c, fmt.Sprintf("%s[%d]", name, i), a.Add(i*s), t.Elem, live)

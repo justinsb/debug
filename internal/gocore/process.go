@@ -73,6 +73,15 @@ type Process struct {
 	// Sorted list of all roots.
 	// Only initialized if FlagReverse is passed to Core.
 	rootIdx []*Root
+
+	reachability *ReachableInfo
+}
+
+func (p *Process) Reachability() *ReachableInfo {
+	if p.reachability == nil {
+		p.reachability = computeRoots(p)
+	}
+	return p.reachability
 }
 
 // Process returns the core.Process used to construct this Process.
@@ -155,6 +164,7 @@ func Core(proc *core.Process) (p *Process, err error) {
 
 	// Read all the data that depend on runtime globals.
 	p.buildVersion = p.rtGlobals["buildVersion"].String()
+	p.buildVersion = strings.TrimSuffix(p.buildVersion, "beta2")
 	versionComponents := strings.Split(p.buildVersion, ".")
 	if len(versionComponents) < 2 {
 		panic("malformed version " + p.buildVersion)
@@ -552,7 +562,7 @@ func (p *Process) readSpans(mheap region, arenas []arena) {
 			sum += c.Size
 		}
 		if sum != s.Size {
-			panic(fmt.Sprintf("check failed for %s: %d vs %d", s.Name, s.Size, sum))
+			panic(fmt.Sprintf("check failed for %s: declared size %d, sum(children.size) %d", s.Name, s.Size, sum))
 		}
 		for _, c := range s.Children {
 			check(c)
@@ -679,22 +689,27 @@ func (p *Process) readFrame(sp, pc core.Address) (*Frame, error) {
 	live := map[core.Address]bool{}
 	if x := int(p.rtConstants["_FUNCDATA_LocalsPointerMaps"]); x < len(f.funcdata) {
 		locals := region{p: p, a: f.funcdata[x], typ: p.findType("runtime.stackmap")}
-		n := locals.Field("n").Int32()       // # of bitmaps
-		nbit := locals.Field("nbit").Int32() // # of bits per bitmap
-		idx, err := f.stackMap.find(off)
-		if err != nil {
-			return nil, fmt.Errorf("cannot read stack map at pc=%#x: %v", pc, err)
-		}
-		if idx < 0 {
-			idx = 0
-		}
-		if idx < int64(n) {
-			bits := locals.Field("bytedata").a.Add(int64(nbit+7) / 8 * idx)
-			base := frame.max.Add(-16).Add(-int64(nbit) * p.proc.PtrSize())
-			// TODO: -16 for amd64. Return address and parent's frame pointer
-			for i := int64(0); i < int64(nbit); i++ {
-				if p.proc.ReadUint8(bits.Add(i/8))>>uint(i&7)&1 != 0 {
-					live[base.Add(i*p.proc.PtrSize())] = true
+		nField := locals.Field("n")
+		if nField.a == 0 {
+			fmt.Printf("skipping n == 0 frame\n")
+		} else {
+			n := locals.Field("n").Int32()       // # of bitmaps
+			nbit := locals.Field("nbit").Int32() // # of bits per bitmap
+			idx, err := f.stackMap.find(off)
+			if err != nil {
+				return nil, fmt.Errorf("cannot read stack map at pc=%#x: %v", pc, err)
+			}
+			if idx < 0 {
+				idx = 0
+			}
+			if idx < int64(n) {
+				bits := locals.Field("bytedata").a.Add(int64(nbit+7) / 8 * idx)
+				base := frame.max.Add(-16).Add(-int64(nbit) * p.proc.PtrSize())
+				// TODO: -16 for amd64. Return address and parent's frame pointer
+				for i := int64(0); i < int64(nbit); i++ {
+					if p.proc.ReadUint8(bits.Add(i/8))>>uint(i&7)&1 != 0 {
+						live[base.Add(i*p.proc.PtrSize())] = true
+					}
 				}
 			}
 		}
